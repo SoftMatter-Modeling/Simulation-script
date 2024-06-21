@@ -1,0 +1,122 @@
+units               lj
+atom_style          full
+boundary	        p p p
+neighbor	        2.0 bin
+neigh_modify	    every 3 delay 0 check yes
+ 
+
+package  gpu         1  neigh no
+
+pair_style          lj/cut/gpu 1.12246204830937
+bond_style          fene
+angle_style         cosine
+
+if "${idx} == 00000" then &
+    "read_data        data.wrapped" & 
+     "comm_modify mode single cutoff 5.0 vel yes" & 
+else & 
+     "box             tilt large" & 
+     "read_restart        ${rfile}" 
+
+pair_coeff          * * 1.0 1.0 1.12246204830937
+pair_modify         shift yes
+
+bond_coeff          1 30.0 1.5 1.0 1.0
+angle_coeff         1 1.5
+special_bonds       fene
+
+
+if "${idx} == 00000" then & 
+    "reset_timestep 0" &  
+    "shell mkdir coord" & 
+    "shell mkdir rmatrix" & 
+    "shell mkdir stress" & 
+    "shell mkdir Log" & 
+    "shell mkdir restart" &   
+    "shell mkdir data" 
+    
+#==== define the working temperature and uniaxial extension rate  
+variable mrate          equal  -1.2112e-04
+variable Ttran          equal  2100000
+variable mstep          equal   0.01 
+variable Dflowxy        equal   ${mrate}*${mstep}
+variable Dflowz         equal   -2.0*${mrate}*${mstep}
+variable Cstrain        equal   ${mrate}*${mstep}*${Ttran}
+
+timestep               ${mstep} 
+
+#-----------------------------------------------------
+#cumulatively calculate the flow induced displacement 
+#-----------------------------------------------------
+if "${idx} == 00000" then & 
+  "fix                 fxuef all nvt/uef temp 1.0 1.0  1.0 erate ${mrate} ${mrate} strain ${Cstrain}  ${Cstrain}" & 
+else & 
+  "fix                 fxuef all nvt/uef temp 1.0 1.0  1.0 erate ${mrate} ${mrate}" 
+
+fix                    fxmom all momentum 100 linear 1 1 1
+
+compute puef all property/atomuef xu yu zu
+
+#==== very begining values 
+# it is a tricky here to store the very inital values. 
+#====================================================
+if "${idx} == 00000" then &  
+    "fix          innital0        all     store/state 0 c_puef[1]  c_puef[2] c_puef[3] " & 
+else &
+    "fix          innital0        all     store/state 0 xu yu zu " 
+#====================================================    
+
+##==== starting values of each restart  
+fix          ccurn0          all     store/state 0 c_puef[1]  c_puef[2] c_puef[3]
+
+variable     a0x             atom    "f_accum0x + f_ccurn0[1]*v_Dflowxy"
+fix          accum0x         all     store/state 0 v_a0x
+
+variable     a0y             atom    "f_accum0y + f_ccurn0[2]*v_Dflowxy"
+fix          accum0y         all     store/state 0 v_a0y
+
+variable     a0z             atom    "f_accum0z + f_ccurn0[3]*v_Dflowz"
+fix          accum0z         all     store/state 0 v_a0z
+
+##==== values at current step 
+fix          ccurn           all     store/state 1 c_puef[1]  c_puef[2] c_puef[3]
+
+variable     ax              atom    "f_accumx + f_ccurn[1]*v_Dflowxy"
+fix          accumx          all     store/state 1 v_ax
+
+variable     ay              atom    "f_accumy + f_ccurn[2]*v_Dflowxy"
+fix          accumy          all     store/state 1 v_ay
+
+variable     az              atom    "f_accumz + f_ccurn[3]*v_Dflowz"
+fix          accumz          all     store/state 1 v_az
+
+##==== final output cummulative values 
+variable     accx   atom  "f_accumx-f_accum0x-f_ccurn[1]*v_Dflowxy+f_innital0[1]*v_Dflowxy"
+variable     accy   atom  "f_accumy-f_accum0y-f_ccurn[2]*v_Dflowxy+f_innital0[2]*v_Dflowxy"
+variable     accz   atom  "f_accumz-f_accum0z-f_ccurn[3]*v_Dflowz+f_innital0[3]*v_Dflowz"
+
+variable     mdump equal  1000
+dump 2  all custom    ${mdump}  coord/dump.*.txt id type vx vy vz c_puef[1] c_puef[2] c_puef[3] v_accx v_accy  v_accz xu yu zu 
+dump_modify 2 sort  id  flush yes pad 10 format line "%d %d %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f"
+
+compute rmatrix all rotation/uef
+fix rot all ave/time 1 1 ${mdump} c_rmatrix[*] file rmatrix/rotation.${idx}
+#----------------------------------------------------- 
+#-----------------------------------------------------
+variable         mstress  equal   10
+variable         mpxx  equal   c_fxuef_press[1]
+variable         mpyy  equal   c_fxuef_press[2]
+variable         mpzz  equal   c_fxuef_press[3]
+fix fxpress1     all ave/time   1   1  ${mstress}  v_mpxx v_mpyy v_mpzz file stress/press.${idx}
+
+thermo          10000
+thermo_style    custom step temp press epair ebond eangle pe lx ly lz 
+thermo_modify   norm yes flush yes
+
+log Log/prod.log.${idx}
+run		        300000
+undump 2 
+unfix ccurn0
+unfix ccurn
+write_restart restart/restart.${idx}
+write_data data/data.${idx}

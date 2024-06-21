@@ -1,0 +1,241 @@
+# assign different molecular ID for each bead in one bead membrane, due to the commonad of compute chunk/atom
+# assign the molecular ID of nanoparticle as the last one, for total area and volume computaiton because of the angle_rbc.cpp 
+  
+units lj
+dimension  3                                                                                                          
+atom_style   hybrid  ellipsoid molecular                
+boundary     p p p   
+neighbor     1.0 bin  
+neigh_modify   every 1 delay 1 
+ 
+
+#----------define the potential-------------------------------------------  
+dihedral_style bend 
+bond_style hybrid harmonic ljlr
+angle_style rbc 
+pair_style   hybrid  fluidmembrane 2.6  lj42/cut  1.12246 lj/cosine1 1.1225 3.5
+    
+read_data    R30_kb01_cubic.data                                                                              
+set type     1*2 shape  1 1 1                                         
+ 
+					     
+pair_coeff   1     1     fluidmembrane  1.0  1.0   2.6  4  3  0.0
+pair_coeff   1     2     fluidmembrane  1.0  1.0   2.6  4  3  0.0
+pair_coeff   2     2     fluidmembrane  1.0  1.0   2.6  4  3  0.0
+pair_coeff   1*2   3*4   lj42/cut    1.0   1.12246  1.12246
+pair_coeff   3*4   3*4   lj42/cut    1.0   1.12246  1.12246
+pair_coeff   2 4   lj/cosine1        0.0   1.0  1.1225   15.5    # Ligand-Receptor
+
+pair_modify pair lj42/cut shift yes 
+
+special_bonds lj 1.0 1.0 1.0 extra 100
+
+comm_style tiled
+comm_modify cutoff  6.0
+                                                        
+group ND type 3 4
+#initial velocities
+
+group bilayer type 1 2 
+velocity bilayer create 0.18 492845 rot yes dist gaussian
+velocity ND   create 0.001  3333  rot yes dist gaussian
+
+balance 1.1 rcb
+fix fxbal all balance 10000 1.1 rcb
+
+thermo	     500                                               
+timestep     0.005      
+thermo_style custom step   press ebond pxx pyy pzz lx ly lz    
+
+neigh_modify exclude molecule/intra ND 
+   
+   
+#--------------dump the bond position and velocity information---------------   
+dump 1 all custom 10000  smd.*.lammpstrj id mol type xu yu zu 
+dump_modify 1 sort id 
+
+compute 1 all property/local btype batom1 batom2
+compute 2 all bond/local dist engpot force 
+dump 11 all local 10000 bond.*.dump index c_1[1] c_1[2] c_1[3] c_2[1] c_2[2] c_2[3]
+dump_modify 11 sort 1
+
+group cbilayer type 1 2
+compute corient cbilayer property/atom  quatw quati quatj quatk
+dump 2 all custom 10000 velocites.*.lammpstrj id vx vy vz c_corient[1] c_corient[2] c_corient[3] c_corient[4]    
+dump_modify 2 sort id 
+#--------------dump the bond position and velocity information---------------  
+
+
+
+#-----------ensemble for the bilayer and nanoparticle------------
+group bilayer type 1 2 
+compute mytemp bilayer temp/asphere
+compute mypress all  pressure mytemp ke pair                                           
+fix   fxnvt bilayer nvt/asphere temp 0.18 0.18  0.5                    
+fix   fxtens bilayer tension/berendsen1  x -0.07 -0.07 5 y -0.07 -0.07 5 couple xy modulus 18 dilate partial  
+fix_modify fxtens press mypress 
+
+#---------------------------------------------------------------
+compute NDTemp ND temp 
+fix fixnve  ND  nve 
+fix fxlanND ND langevin 0.001 0.001 1 48279
+fix_modify  fxlanND  temp NDTemp 
+#-----------ensemble for the bilayer and nanoparticle------------
+
+
+
+
+#------------------out put the energy change during the endocytosis process --------------------------
+group LP type 1 2 
+compute cpe12  LP pe/atom pair 
+compute rcpe12 LP reduce sum c_cpe12
+compute rcpe13 LP group/group ND
+fix fxoutlp all ave/time 1 100 1000 c_rcpe12 c_rcpe13  file potential_energy_LP.txt
+
+compute cpe1  ND pe/atom bond 
+compute rcpe1 ND reduce sum c_cpe1
+compute cpe2  ND pe/atom angle 
+compute rcpe2 ND reduce sum c_cpe2
+compute cpe3  ND pe/atom dihedral
+compute rcpe3 ND reduce sum c_cpe3
+compute cpe4  ND pe/atom pair 
+compute rcpe4 ND reduce sum c_cpe4
+fix fxoutnp all ave/time 1 100 1000 c_rcpe1 c_rcpe2 c_rcpe3 c_rcpe4  file potential_energy_NP.txt
+#------------------out put the energy change during the endocytosis process --------------------------
+
+
+fix n2 all bond/create 1  2 4 15.0 1 prob 1.0  85784 iparam 1 2 jparam 1 4
+
+run 10 
+unfix n2
+unfix fxnvt
+unfix fxtens
+uncompute mypress 
+uncompute mytemp 
+group bilayer delete 
+
+
+
+#------------------loop for the ligand-receptor interaction and receptor adding--------------------------
+variable maxkeep equal 0 
+variable i loop 10000000
+label loop1
+
+group bilayer type 1 2 
+compute mytemp bilayer temp/asphere
+compute mypress all  pressure mytemp ke pair                                           
+fix   fxnvt bilayer nvt/asphere temp 0.18 0.18  0.5                    
+fix   fxtens bilayer tension/berendsen1  x -0.07 -0.07 5 y -0.07 -0.07 5 couple xy modulus 18 dilate partial  
+fix_modify fxtens press mypress 
+
+group GLR type 2 4
+compute  NU    GLR property/local btype
+compute  CNU   GLR reduce sum  c_NU 
+fix f2   GLR ave/time 1  1  100 c_CNU
+
+fix n2 all bond/create 100  2 4 15.0 1 prob 1.0 8578 iparam 1 2 jparam 1 4
+fix n3 all bond/break  100  1 15.1
+thermo_style custom step temp etotal press lx ly lz f_n2[1] f_n2[2] f_n3[1] f_n3[2] 
+
+run 100   
+
+variable count1 equal f_f2
+variable keep1  equal ${count1}
+variable diff   equal ${keep1}-${maxkeep}
+print 'the difference between steps are ${diff}'
+
+if "${count1}>${maxkeep}" then &
+"variable maxkeep equal ${count1}"
+
+variable xc1 equal xcm(ND,x)-lx/2 
+variable xc2 equal xcm(ND,x)+lx/2
+variable yc1 equal xcm(ND,y)-ly/2 
+variable yc2 equal xcm(ND,y)+ly/2
+change_box all x final ${xc1} ${xc2} y final ${yc1} ${yc2} units box
+ 
+variable x1 equal xlo+6
+variable x2 equal xhi-6
+variable y1 equal ylo+6
+variable y2 equal yhi-6
+
+region regstrip1 block  EDGE ${x1}  EDGE  EDGE  EDGE EDGE side in units box
+region regstrip2 block ${x2}  EDGE  EDGE  EDGE  EDGE EDGE side in units box
+region regstrip3 block  EDGE  EDGE  EDGE ${y1}  EDGE EDGE side in units box
+region regstrip4 block  EDGE  EDGE ${y2}  EDGE  EDGE EDGE side in units box
+region regstrip union 4 regstrip1 regstrip2 regstrip3 regstrip4
+
+if "${diff}>0" then &
+"print 'the loop number for chaninge type is  ${diff}' " &
+"group liphead type 1 " &   
+"group regstrip region regstrip " & 
+"group lipbc intersect regstrip liphead " & 
+"variable orig equal count(lipbc) " & 
+"compute CCH lipbc chunk/atom molecule nchunk once ids once compress yes discard no" &    
+"run 0 post no" & 
+"dump CID  lipbc custom 1  CID.*.dat id mol type c_CCH " & 
+"dump_modify CID sort id " & 
+"variable Judge equal ${diff}+1 " &
+"variable Pmol atom 'c_CCH < v_Judge' " &
+"group Tar dynamic lipbc var Pmol "  &
+"run 0 post no " &
+"variable NTar equal count(Tar) " & 
+"print 'group Tar has ${NTar} atoms now' " &
+"run 0 post no"  &
+"print 'group Tar has ${NTar} atoms now' " &
+"group Tar static" & 
+"set group Tar type 2 " &
+"group Tar delete " &
+"uncompute CCH " &
+"undump CID" &
+"group lipbc delete" &
+"group regstrip delete" & 
+"group liphead delete" & 
+"variable orig delete" & 
+"variable Judge delete" & 
+"variable Pmol delete" & 
+"variable NTar delete" & 
+
+unfix n2
+unfix n3 
+
+region regstrip1 delete
+region regstrip2 delete
+region regstrip3 delete
+region regstrip4 delete
+region regstrip  delete
+
+
+variable count1 delete
+variable keep1  delete
+variable diff   delete
+
+variable xc1 delete
+variable xc2 delete
+variable yc1 delete 
+variable yc2 delete
+
+variable x1 delete
+variable x2 delete
+variable y1 delete
+variable y2 delete
+
+uncompute mytemp
+uncompute mypress
+uncompute CNU
+uncompute NU
+unfix fxnvt
+unfix fxtens    
+unfix f2
+group  bilayer delete 
+group  GLR  delete
+next i
+jump Endo.in loop1
+
+write_data data.*
+
+
+
+
+
+
+
